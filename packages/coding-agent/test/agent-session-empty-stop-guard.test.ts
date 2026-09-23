@@ -569,6 +569,8 @@ describe("AgentSession empty stop guard", () => {
 		expect(finalError).toContain("126 output tokens billed");
 		expect(finalError).toContain("the reasoning/output split is unknown");
 		expect(finalError).not.toContain("/shake images");
+		// Billed non-reasoning output is positive: the drop hypothesis is allowed.
+		expect(finalError).toContain("content may have been generated and dropped");
 	});
 
 	it("reports the reasoning split for a capped zero-block stop billed only reasoning tokens", async () => {
@@ -598,6 +600,29 @@ describe("AgentSession empty stop guard", () => {
 		expect(finalError).toContain("126 output tokens billed");
 		expect(finalError).toContain("126 of them reasoning");
 		expect(finalError).not.toContain("/shake images");
+		// All billed output is known reasoning: nothing was generated and dropped.
+		expect(finalError).not.toContain("content may have been generated and dropped");
+	});
+
+	it("does not assert a drop cause for a capped zero-block stop that billed nothing", async () => {
+		const { session, mock } = await createHarness([emptyStop(), emptyStop(), emptyStop(), emptyStop()]);
+		const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") {
+				retryEndEvents.push(event);
+			}
+		});
+
+		await expectPromptCompletes(session.prompt("answer without tools"));
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(4);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]?.success).toBe(false);
+		const finalError = retryEndEvents[0]?.finalError ?? "";
+		expect(finalError).toContain("no content blocks at all");
+		// Nothing was billed, so nothing can have been generated and dropped.
+		expect(finalError).not.toContain("content may have been generated and dropped");
 	});
 
 	it("reports a capped thinking-only stop as reasoning-only even though it billed output", async () => {
@@ -918,6 +943,7 @@ describe("delivered-output contract", () => {
 
 	it("records one correlated evidence row per discarded attempt, including the capped one", async () => {
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+		const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => undefined);
 		try {
 			const { session, mock } = await createHarness([emptyStop(), emptyStop(), emptyStop(), emptyStop()]);
 
@@ -925,10 +951,13 @@ describe("delivered-output contract", () => {
 			await session.waitForIdle();
 
 			expect(mock.calls).toHaveLength(4);
-			const rows = warnSpy.mock.calls.map(call => call[1]).filter(isEmptyStopDiagnosticRow);
+			// Retries log at debug; only the cap reaches warn. The per-attempt
+			// sequence is what explains why recovery could not converge, so
+			// only-the-last-attempt is not enough.
+			const debugRows = debugSpy.mock.calls.map(call => call[1]).filter(isEmptyStopDiagnosticRow);
+			const warnRows = warnSpy.mock.calls.map(call => call[1]).filter(isEmptyStopDiagnosticRow);
+			const rows = [...debugRows, ...warnRows];
 
-			// Three retries then the capped turn. The sequence is what explains why
-			// recovery could not converge, so only-the-last-attempt is not enough.
 			expect(rows.map(row => row.dropSeq)).toEqual([1, 2, 3, 4]);
 			expect(rows.map(row => row.decision)).toEqual([
 				"retry-scheduled",
@@ -936,6 +965,9 @@ describe("delivered-output contract", () => {
 				"retry-scheduled",
 				"cap-reached",
 			]);
+			// The cap row carries the finalError text so it survives the drop.
+			const capRow = warnRows.find(row => row.decision === "cap-reached");
+			expect(capRow?.finalError).toBeDefined();
 			for (const row of rows) {
 				expect(row.maxRetries).toBe(3);
 				expect(row.blockKinds).toEqual([]);
@@ -954,6 +986,7 @@ describe("delivered-output contract", () => {
 			}
 		} finally {
 			warnSpy.mockRestore();
+			debugSpy.mockRestore();
 		}
 	});
 });

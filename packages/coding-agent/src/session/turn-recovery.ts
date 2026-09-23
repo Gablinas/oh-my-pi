@@ -14,7 +14,6 @@ import type {
 	Model,
 	ModelUsageHealth,
 	TextContent,
-	ThinkingContent,
 	ToolChoice,
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
@@ -46,7 +45,7 @@ import type {
 	UsageFallbackConfirmation,
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
-import { assistantTurnProducedOutput, isEmptyAssistantStop, isEmptyErrorTurn, isDeliveredContent } from "./messages";
+import { assistantTurnProducedOutput, isDeliveredContent, isEmptyAssistantStop, isEmptyErrorTurn } from "./messages";
 import {
 	type ActiveRetryFallbackState,
 	calculateRetryBackoffDelayMs,
@@ -853,6 +852,7 @@ export class TurnRecovery {
 			dropSeq: this.#emptyStopRetryCount,
 			maxRetries: EMPTY_STOP_MAX_RETRIES,
 			decision: capped ? "cap-reached" : "retry-scheduled",
+			finalError: capped ? finalError : undefined,
 		});
 		if (capped) {
 			const attempts = this.#emptyStopRetryCount - 1;
@@ -1022,10 +1022,15 @@ export class TurnRecovery {
 	#recordEmptyStopAttempt(
 		assistantMessage: AssistantMessage,
 		evidence: Record<string, unknown>,
-		fields: { dropSeq: number; maxRetries: number; decision: "retry-scheduled" | "cap-reached" },
+		fields: {
+			dropSeq: number;
+			maxRetries: number;
+			decision: "retry-scheduled" | "cap-reached";
+			finalError?: string;
+		},
 	): void {
 		try {
-			logger.warn("empty-stop attempt discarded", {
+			const base = {
 				...fields,
 				sessionId: this.#host.sessionId(),
 				promptGeneration: this.#host.promptGeneration(),
@@ -1033,7 +1038,14 @@ export class TurnRecovery {
 				provider: assistantMessage.provider,
 				api: assistantMessage.api,
 				...evidence,
-			});
+			};
+			if (fields.decision === "cap-reached") {
+				// Final error text belongs on the log so it survives alongside
+				// the per-attempt sequence, not only on the assistant message.
+				logger.warn(fields.finalError ?? "empty-stop attempt discarded", base);
+			} else {
+				logger.debug("empty-stop attempt discarded", base);
+			}
 		} catch {
 			// Diagnostic only.
 		}
@@ -2929,17 +2941,31 @@ export function emptyStopDiagnostic(
 			(redactedThinkingBlocks > 0
 				? ` and ${redactedThinkingBlocks} redacted thinking block${redactedThinkingBlocks === 1 ? "" : "s"} (${redactedChars} chars)`
 				: "") +
-			`, and no text, tool call, or image. ${billed}, ${split}`;
+			`, and no text, tool call, or image. ${billed}, ${split}; try switching models`;
 	} else if (blockKinds.length === 0) {
 		recoveryBranch = "zero-block-stop";
+		// The drop hypothesis needs billed non-reasoning output: nothing billed,
+		// or output attributed entirely to reasoning, cannot have been generated
+		// and dropped. Otherwise, describe the stop without asserting a cause.
+		const billedNonReasoning = (outputTokens ?? 0) - (reasoningTokens ?? 0);
+		const dropHypothesis =
+			billedNonReasoning > 0
+				? "content may have been generated and dropped before delivery"
+				: "no cause can be inferred from the recorded usage";
+		finalError = `Assistant returned an empty stop after retry cap with no content blocks at all and ${billed}, ${split}; ${dropHypothesis}; try switching models`;
+	} else if (assistantMessage.stopReason === "toolUse" && deliveredBlocks > 0) {
+		// An image (or other non-anchoring block) survives finalization but the
+		// model emitted no tool_call or text — an orphaned toolUse that would
+		// corrupt Anthropic history. Name the real cause and let the user act.
+		recoveryBranch = "orphaned-tooluse-stop";
 		finalError =
-			`Assistant returned an empty stop after retry cap with no content blocks at all and ${billed}, ${split}; ` +
-			`content may have been generated and dropped before delivery`;
+			`Assistant returned a toolUse stop with no tool call and ${deliveredBlocks} non-anchoring block${deliveredBlocks === 1 ? "" : "s"} ` +
+			`[${blockKinds.join(", ")}] (${billed}, ${split}); try switching models`;
 	} else {
 		recoveryBranch = "non-actionable-mixed";
 		finalError =
 			`Assistant returned empty stop after retry cap with ${deliveredBlocks} delivered block${deliveredBlocks === 1 ? "" : "s"} ` +
-			`and non-actionable blocks [${blockKinds.join(", ")}] (${billed}, ${split}); no deliverable output survived`;
+			`and non-actionable blocks [${blockKinds.join(", ")}] (${billed}, ${split}); no deliverable output survived; try switching models`;
 	}
 	return {
 		finalError,

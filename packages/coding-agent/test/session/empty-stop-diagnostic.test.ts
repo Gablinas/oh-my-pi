@@ -5,6 +5,7 @@ import { emptyStopDiagnostic } from "@oh-my-pi/pi-coding-agent/session/turn-reco
 function stop(
 	content: AssistantMessage["content"],
 	usage: { input?: number; output: number; reasoningTokens?: number },
+	stopReason: AssistantMessage["stopReason"] = "stop",
 ): AssistantMessage {
 	return {
 		role: "assistant",
@@ -13,7 +14,7 @@ function stop(
 		provider: "minimax-code",
 		model: "MiniMax-M3",
 		usage: { input: 0, cacheRead: 0, cacheWrite: 0, ...usage },
-		stopReason: "stop",
+		stopReason,
 	} as AssistantMessage;
 }
 
@@ -73,6 +74,56 @@ describe("emptyStopDiagnostic", () => {
 		expect(finalError).toContain("no content blocks at all");
 		// A content filter needs provider evidence; the message may not claim one.
 		expect(finalError).not.toContain("content filter");
+		// Billed non-reasoning output is positive, so the drop hypothesis is allowed.
+		expect(finalError).toContain("content may have been generated and dropped");
+		// Every terminal branch offers the same observation-independent next step.
+		expect(finalError).toContain("try switching models");
+	});
+
+	it("does not claim a drop when nothing was billed", () => {
+		const { finalError, recoveryBranch } = emptyStopDiagnostic(stop([], { output: 0 }), false);
+
+		expect(recoveryBranch).toBe("zero-block-stop");
+		// Nothing was billed, so nothing can have been generated and dropped.
+		expect(finalError).not.toContain("content may have been generated and dropped");
+		expect(finalError).toContain("try switching models");
+	});
+
+	it("does not claim a drop when all billed output is known reasoning", () => {
+		const { finalError, recoveryBranch } = emptyStopDiagnostic(
+			stop([], { output: 126, reasoningTokens: 126 }),
+			false,
+		);
+
+		expect(recoveryBranch).toBe("zero-block-stop");
+		// Reasoning-only output is not evidence that deliverable content was dropped.
+		expect(finalError).not.toContain("content may have been generated and dropped");
+		expect(finalError).toContain("126 of them reasoning");
+		expect(finalError).toContain("try switching models");
+	});
+
+	it("does not claim a drop when the reasoning split exactly equals output", () => {
+		const { finalError } = emptyStopDiagnostic(stop([], { output: 200, reasoningTokens: 200 }), false);
+		expect(finalError).not.toContain("content may have been generated and dropped");
+	});
+
+	it("names an orphaned toolUse stop that survived only as a non-anchoring block", () => {
+		const { finalError, recoveryBranch } = emptyStopDiagnostic(
+			stop(
+				[{ type: "image", data: "ignored-by-isDeliveredContent", mimeType: "image/png" }],
+				{ output: 80 },
+				"toolUse",
+			),
+			false,
+		);
+
+		expect(recoveryBranch).toBe("orphaned-tooluse-stop");
+		expect(finalError).toContain("toolUse stop with no tool call");
+		expect(finalError).toContain("1 non-anchoring block");
+		expect(finalError).toContain("[image]");
+		// The new text never contradicts itself by counting image as "delivered".
+		expect(finalError).not.toContain("no deliverable output survived");
+		expect(finalError).toContain("try switching models");
 	});
 
 	it("keeps an absent reasoning split unknown instead of reading it as zero", () => {

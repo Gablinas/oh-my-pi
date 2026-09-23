@@ -57,13 +57,6 @@ function unexpectedStop(text: string): MockResponse {
 	};
 }
 
-function thinkingOnlyStop(thinking: string): MockResponse {
-	return {
-		content: [{ type: "thinking", thinking, thinkingSignature: "reasoning_content" }],
-		stopReason: "stop",
-	};
-}
-
 async function createHarness(
 	responses: MockResponse[],
 	settingsOverrides: SettingsOverrides = {},
@@ -127,13 +120,13 @@ function assistantText(messages: AgentMessage[]): string {
 }
 
 function reminderMessages(messages: AgentMessage[]): AgentMessage[] {
-	// Any bounded-recovery reminder, whichever recovery path owns the turn. Which
-	// template is injected is not the contract; that a retry reminder was injected
-	// is. Matching one template here pinned the reminder's wording.
+	// Match the distinctive first line of each recovery template so a reminder
+	// from a different system (todo, ttsr) is not miscounted as a recovery
+	// reminder. Bare `<system-injection>` matched every bounded-recovery
+	// reminder plus unrelated injections.
 	const isRecoveryReminder = (text: string): boolean =>
-		text.includes("You said you would continue") ||
-		text.includes("<system-reminder>") ||
-		text.includes("<system-injection>");
+		text.includes("You said you would continue with a tool call") ||
+		text.includes("Stopped without actionable output");
 
 	return messages.filter((message): message is Extract<AgentMessage, { role: "developer" }> => {
 		if (message.role !== "developer") return false;
@@ -171,22 +164,6 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(spy).not.toHaveBeenCalled();
 		expect(mock.calls).toHaveLength(1);
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
-	});
-
-	it("defaults to mechanical mode and retries on thinking-only stops without classification", async () => {
-		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(false);
-		const { session, mock } = await createHarness([
-			thinkingOnlyStop("思考中..."),
-			{ content: ["done now"], stopReason: "stop" },
-		]);
-
-		await session.prompt("do the thing");
-		await session.waitForIdle();
-
-		expect(spy).not.toHaveBeenCalled();
-		expect(mock.calls).toHaveLength(2);
-		expect(assistantText(session.agent.state.messages)).toContain("done now");
-		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
 	});
 
 	it("does not retry in mechanical mode when text message was delivered", async () => {
@@ -239,24 +216,6 @@ describe("AgentSession unexpected stop guard", () => {
 		await session.waitForIdle();
 
 		expect(spy).toHaveBeenCalledTimes(2);
-		expect(mock.calls).toHaveLength(2);
-		expect(assistantText(session.agent.state.messages)).toContain("done now");
-		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
-	});
-
-	it("retries a thinking-only stop directly in smart mode", async () => {
-		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(false);
-		const { session, mock } = await createHarness(
-			[thinkingOnlyStop(" 响应"), { content: ["done now"], stopReason: "aborted" }],
-			{
-				"features.unexpectedStopDetection": "smart",
-			},
-		);
-
-		await session.prompt("do the thing");
-		await session.waitForIdle();
-
-		expect(spy).not.toHaveBeenCalled();
 		expect(mock.calls).toHaveLength(2);
 		expect(assistantText(session.agent.state.messages)).toContain("done now");
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
