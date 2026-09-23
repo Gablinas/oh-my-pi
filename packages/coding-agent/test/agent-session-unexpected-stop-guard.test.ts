@@ -127,6 +127,14 @@ function assistantText(messages: AgentMessage[]): string {
 }
 
 function reminderMessages(messages: AgentMessage[]): AgentMessage[] {
+	// Any bounded-recovery reminder, whichever recovery path owns the turn. Which
+	// template is injected is not the contract; that a retry reminder was injected
+	// is. Matching one template here pinned the reminder's wording.
+	const isRecoveryReminder = (text: string): boolean =>
+		text.includes("You said you would continue") ||
+		text.includes("<system-reminder>") ||
+		text.includes("<system-injection>");
+
 	return messages.filter((message): message is Extract<AgentMessage, { role: "developer" }> => {
 		if (message.role !== "developer") return false;
 		const text =
@@ -134,7 +142,7 @@ function reminderMessages(messages: AgentMessage[]): AgentMessage[] {
 				? message.content
 				: message.content.find((content): content is { type: "text"; text: string } => content.type === "text")
 						?.text) ?? "";
-		return text.includes("You said you would continue");
+		return isRecoveryReminder(text);
 	});
 }
 
