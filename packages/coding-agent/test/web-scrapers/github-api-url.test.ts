@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Settings } from "../../src/config/settings";
 import type { ToolSession } from "../../src/sdk";
 import { ReadTool } from "../../src/tools/read";
-import { github } from "../../src/utils/github";
+import { github, GitHubAuthNotConfiguredError } from "../../src/utils/github";
 import { handleGitHub } from "../../src/web/scrapers/github";
 import * as pages from "../../src/web/scrapers/types";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
@@ -94,14 +94,20 @@ describe("authenticated GitHub repository API URL reads", () => {
 		expect(text).toContain('"id": 42');
 	});
 
-	test("public repository JSON stays readable after an explicit local authentication setup refusal", async () => {
-		vi.spyOn(github, "run").mockResolvedValue({
-			exitCode: 4,
-			stdout: "",
-			stderr:
-				"To get started with GitHub CLI, please run:  gh auth login\n" +
+	test.each([
+		[
+			"interactive",
+			"To get started with GitHub CLI, please run:  gh auth login\n" +
 				"Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.\n",
-		});
+		],
+		["CI", "gh: To use GitHub CLI in automation, set the GH_TOKEN environment variable.\n"],
+		[
+			"GitHub Actions",
+			"gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable. Example:\n" +
+				`  env:\n    GH_TOKEN: \${{ github.token }}\n`,
+		],
+	])("public repository JSON stays readable after %s authentication preflight", async (_context, stderr) => {
+		vi.spyOn(github, "run").mockResolvedValue({ exitCode: 4, stdout: "", stderr });
 		vi.spyOn(pages, "loadPage").mockResolvedValue({
 			ok: true,
 			status: 200,
@@ -119,18 +125,30 @@ describe("authenticated GitHub repository API URL reads", () => {
 		expect(text).toContain('"id": 42');
 	});
 
-	test("HTTP auth failures and an unclassified exit code 4 never trigger an anonymous retry", async () => {
+	test("HTTP auth failures, unexpected non-4 failures and nonempty exit-4 output never trigger an anonymous retry", async () => {
 		const run = vi.spyOn(github, "run");
 		const anonymous = vi.spyOn(pages, "loadPage").mockRejectedValue(new Error("unexpected anonymous retry"));
 		for (const result of [
 			{ exitCode: 1, stdout: '{"message":"Bad credentials"}', stderr: "gh: Bad credentials (HTTP 401)" },
 			{ exitCode: 1, stdout: '{"message":"Forbidden"}', stderr: "gh: Forbidden (HTTP 403)" },
-			{ exitCode: 4, stdout: "", stderr: "unclassified failure" },
+			{ exitCode: 7, stdout: "", stderr: "unexpected API failure" },
+			{ exitCode: 4, stdout: "partial response", stderr: "incomplete API response" },
 		]) {
 			run.mockResolvedValue(result);
 			await expect(tool.execute("failure", { path: URL })).rejects.toThrow(result.stderr);
 		}
 		expect(anonymous).not.toHaveBeenCalled();
+	});
+
+	test("non-api authentication refusal retains the ordinary failure category", async () => {
+		vi.spyOn(github, "run").mockResolvedValue({
+			exitCode: 4,
+			stdout: "",
+			stderr:
+				"To get started with GitHub CLI, please run:  gh auth login\n" +
+				"Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.\n",
+		});
+		await expect(github.text(dir, ["repo", "view"])).rejects.not.toBeInstanceOf(GitHubAuthNotConfiguredError);
 	});
 
 	test("real HTTP 404 stays an error; no permission diagnosis or anonymous retry hides it", async () => {

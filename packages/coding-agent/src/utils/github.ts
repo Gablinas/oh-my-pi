@@ -193,13 +193,9 @@ export const github = {
 	/** Run `gh` and return stdout as text. Throws on non-zero exit. */
 	async text(cwd: string, args: string[], signal?: AbortSignal, options?: GhCommandOptions): Promise<string> {
 		const result = await github.run(cwd, args, signal, options);
-		if (
-			result.exitCode === 4 &&
-			!result.stdout.trim() &&
-			/^To get started with GitHub CLI, please run:\s+gh auth login\r?\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token\.$/.test(
-				result.stderr.trim(),
-			)
-		) {
+		// `gh api` exits 4 at its authentication preflight, before issuing a request.
+		// HTTP failures exit 1; setup refusals have no response on stdout.
+		if (args[0] === "api" && result.exitCode === 4 && !result.stdout.trim()) {
 			throw new GitHubAuthNotConfiguredError();
 		}
 		if (result.exitCode !== 0) throw new ToolError(formatGhFailure(args, result.stdout, result.stderr, options));

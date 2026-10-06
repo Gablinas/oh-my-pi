@@ -19,7 +19,7 @@
 
 ### Fixed
 
-- Fixed rendered reads of GitHub repository API URLs failing for private resources accessible through GitHub CLI authentication, while preserving public reads without a configured CLI and the unauthenticated `:raw` behavior.
+- Fixed rendered reads of GitHub repository API URLs failing for private resources accessible through GitHub CLI authentication, while preserving public reads without CLI authentication in interactive, CI and GitHub Actions environments and the unauthenticated `:raw` behavior.
 - Fixed standalone builds failing when the native addon archive could not be resolved.
 - Fixed JSON query parsing and parameter decoding for filters beginning with hyphens and other encoded query values.
 - Fixed task execution after settings could not be saved; subagents now use the current in-memory settings while the save failure is reported as a warning.
