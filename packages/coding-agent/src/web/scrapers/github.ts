@@ -1,4 +1,5 @@
 import { $env, ptree, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { github, GitHubAuthNotConfiguredError } from "../../utils/github";
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult, formatMediaDuration, loadPage } from "./types";
 
@@ -700,6 +701,45 @@ export const handleGitHub: SpecialHandler = async (
 	timeout: number,
 	signal?: AbortSignal,
 ): Promise<RenderResult | null> => {
+	// Repository API URLs use the same authenticated, bounded GET transport as gh tools.
+	// Never hand a caller-selected host, credentials, or protocol to that transport.
+	if (!URL.canParse(url)) return null;
+	const parsed = new URL(url);
+	if (
+		parsed.origin === "https://api.github.com" &&
+		!parsed.username &&
+		!parsed.password &&
+		/^\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/|$)/.test(parsed.pathname)
+	) {
+		if (!github.available()) return null;
+		let content: string;
+		try {
+			content = await github.text(
+				process.cwd(),
+				["api", "--hostname", "github.com", "--method", "GET", `${parsed.pathname}${parsed.search}`],
+				ptree.combineSignals(signal, timeout * 1000),
+				{ repoProvided: true, trimOutput: false },
+			);
+		} catch (error) {
+			if (error instanceof GitHubAuthNotConfiguredError) return null;
+			throw error;
+		}
+		let contentType = "text/plain";
+		try {
+			content = JSON.stringify(JSON.parse(content), null, 2);
+			contentType = "application/json";
+		} catch {
+			// Successful API responses such as redirected workflow logs are plain text.
+		}
+		return buildResult(content, {
+			url,
+			method: "github-api",
+			fetchedAt: new Date().toISOString(),
+			contentType,
+			notes: ["Authenticated repository API GET via GitHub CLI; HTTP 404 can mean missing or inaccessible."],
+		});
+	}
+
 	const gh = parseGitHubUrl(url);
 	if (!gh) return null;
 

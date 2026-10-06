@@ -18,6 +18,13 @@ export interface GhCommandOptions {
 	trimOutput?: boolean;
 }
 
+/** The CLI refused locally because no authentication was configured, before making an API request. */
+export class GitHubAuthNotConfiguredError extends ToolError {
+	constructor() {
+		super("GitHub CLI is not authenticated. Run `gh auth login`.");
+	}
+}
+
 /** Deadline for `gh` subprocesses spawned by the coding agent. */
 export const GH_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -186,6 +193,15 @@ export const github = {
 	/** Run `gh` and return stdout as text. Throws on non-zero exit. */
 	async text(cwd: string, args: string[], signal?: AbortSignal, options?: GhCommandOptions): Promise<string> {
 		const result = await github.run(cwd, args, signal, options);
+		if (
+			result.exitCode === 4 &&
+			!result.stdout.trim() &&
+			/^To get started with GitHub CLI, please run:\s+gh auth login\r?\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token\.$/.test(
+				result.stderr.trim(),
+			)
+		) {
+			throw new GitHubAuthNotConfiguredError();
+		}
 		if (result.exitCode !== 0) throw new ToolError(formatGhFailure(args, result.stdout, result.stderr, options));
 		return result.stdout;
 	},
